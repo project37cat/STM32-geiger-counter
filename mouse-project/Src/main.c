@@ -1,3 +1,4 @@
+
 /**
   ******************************************************************************
   * @file           : main.c
@@ -41,7 +42,7 @@
 
 /* USER CODE BEGIN Includes */
 
-#include "SSD1306.h"
+#include "ssd1306.h"
 #include "rtc32.h"
 
 /* USER CODE END Includes */
@@ -58,6 +59,7 @@ TIM_HandleTypeDef htim3;
 /* Private variables ---------------------------------------------------------*/
 
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
 
 #define BOARD_LED_OFF  (HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET))
 #define BOARD_LED_ON   (HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET))
@@ -78,25 +80,13 @@ uint16_t radimp[GEIGER_TIME+1];   //pulse counter
 
 uint32_t glog[128];
 
-extern char strbuff[32];
+char strbuff[32];
 
-volatile uint32_t gf=0;      // flag - auto 1Hz - got geiger counter data
+volatile uint32_t gflag=0;   // flag - auto 1Hz - got geiger counter data
 volatile uint32_t gcnt=0;    // counter - geiger counter data for the previous second
 volatile uint32_t sescnt=0;  // counter - duration of the current session
 
-/*
-//%%%%%%%%%%%%%%%%%%%%%  temp for debug  %%%%%%%%%%%%%%%
-uint32_t d_t1;
-uint32_t d_t2;
-uint32_t d_t3;
-uint32_t d_t4;
 
-uint32_t d_t5;
-uint32_t d_t6;
-uint32_t d_t7;
-uint32_t d_t8;
-//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-*/
 //^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 /* USER CODE END PV */
 
@@ -166,7 +156,7 @@ uint16_t get_vdd(void)
      || (vrefint == 4095)
      || (vrefint > olddata + 1)
      || (vrefint < olddata - 1))  { olddata = vrefint; }
-//d_t1=vrefint;
+
     uint16_t vdd = 0;
     if(olddata) vdd=((1207*4095)/olddata);
     return vdd;
@@ -184,7 +174,7 @@ uint16_t get_bat(uint16_t vdd)
      || (battery == 4095)
      || (battery > olddata + 1)
      || (battery < olddata - 1))  { olddata = battery; }
-//d_t2=battery;
+
     uint16_t bat = ((olddata*vdd)/4095)*2.010;
     return bat;
     }
@@ -220,15 +210,23 @@ uint8_t button2_h(void)
     return old;
     }
 
-//xxx
-//-----------------------------------------------------------------------------
-void sys_backup(uint32_t newttot, uint32_t newdtot)
-    {
-    write_backup_reg(&hrtc, RTC_BKP_DR2, newttot>>16);  //write backup data
-    write_backup_reg(&hrtc, RTC_BKP_DR3, newttot);
 
-    write_backup_reg(&hrtc, RTC_BKP_DR4, newdtot>>16);
-    write_backup_reg(&hrtc, RTC_BKP_DR5, newdtot);
+//-----------------------------------------------------------------------------
+void sys_backup(uint32_t newttot, uint32_t newdtot, uint8_t oledbright)
+    {
+    HAL_PWR_EnableBkUpAccess();
+    __HAL_RCC_BKP_CLK_ENABLE();
+
+    HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR2, newttot>>16);  //write backup data
+    HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR3, newttot);
+
+    HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR4, newdtot>>16);
+    HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR5, newdtot);
+
+    HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR6, oledbright);
+
+    HAL_PWR_DisableBkUpAccess();
+    __HAL_RCC_BKP_CLK_DISABLE();
     }
 
 
@@ -301,11 +299,11 @@ void sys_standby(void)
     }
 
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
+//-----------------------------------------------------------------------------
 void sys_init(void)
     {
-    HV_ON;      // ENABLE HV booster circuit
-    BAT_DIV_ON; // ENABLE battery divider circuit
+    HV_ON;      // HV converter circuit
+    BAT_DIV_ON; // battery divider circuit
 
     HAL_ADCEx_Calibration_Start(&hadc1);  // ADC self-calibration
 
@@ -313,20 +311,25 @@ void sys_init(void)
     HAL_TIM_Base_Start_IT(&htim3);        // start 1sec timer
 
     oled_init();         // display init
+    oled_char(0,7,128);
+    oled_update();
+
+    while(button1_h());
+    HAL_Delay(50);
     }
 
 
-//=================================================================================================
+//=============================================================================
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim3)  // 1 Hz interrupt
     {
-    if(gf)  { gcnt += htim2.Instance->CNT; }
-    else    { gcnt = htim2.Instance->CNT;  }
+    if(gflag)  { gcnt += htim2.Instance->CNT; }
+    else       { gcnt = htim2.Instance->CNT;  }
 
     htim2.Instance->CNT = 0;  //clear the cnt register
 
     sescnt++;
 
-    gf=1;
+    gflag=1;
     }
 
 
@@ -374,18 +377,27 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
+  //watchdog //xxx
+
   sys_init();
 
-  while(button1_h());
+  uint8_t df = 0;  //display flag
+  uint8_t pf = 0;  //poweroff flag
 
-  uint8_t df = 0x00;  //display flag
+  uint8_t batlow = 0;   //battery low flag
+  uint8_t batfail = 0;  //battery fail
 
-  uint8_t smode = 0x00;
-  uint8_t nummen = 0;
+  uint8_t ff=0;    //hardware fail flag
+  uint8_t fcnt=0;
 
-  uint8_t ssmenu = 0;
+  uint8_t smode = 0;  //main screen mode
+  uint8_t mmenu = 0;  //main menu
+
+  uint8_t ssmenu = 0; //settigs menu
   uint8_t dtmenu = 0;
   uint8_t crmenu = 0;
+
+  uint16_t oledbright = 0x0000;
 
   uint16_t sysvdd = 0x0000;   //Vdd
   uint16_t sysbat = 0x0000;   //Vbat
@@ -403,8 +415,11 @@ int main(void)
   uint32_t sesdose = 0;  // session dose
   uint32_t totdose = 0;  // total dose (from bkp)
 
-  tottime = (read_backup_reg(&hrtc, RTC_BKP_DR2)<<16) + read_backup_reg(&hrtc, RTC_BKP_DR3);
-  totdose = (read_backup_reg(&hrtc, RTC_BKP_DR4)<<16) + read_backup_reg(&hrtc, RTC_BKP_DR5);
+  tottime = (HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR2)<<16) + HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR3);
+  totdose = (HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR4)<<16) + HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR5);
+
+  oledbright = HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR6);
+  oled_bright(oledbright);
 
   while(1)
     {
@@ -413,207 +428,251 @@ int main(void)
 
   /* USER CODE BEGIN 3 */
   //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-      if(gf==1)  // calc
-          {
-          radimp[0] = (uint16_t)gcnt;
-          for(uint8_t k=GEIGER_TIME; k>0; k--) radimp[k]=radimp[k-1]; //shift
+    if(gflag==1 && pf==0)  //-----------------> calculation <------------------
+        {
+        radimp[0] = (uint16_t)gcnt;
+        for(uint8_t k=GEIGER_TIME; k>0; k--) radimp[k]=radimp[k-1]; //shift
 
-          uint32_t tmprate=0;
-          for(uint8_t k=GEIGER_TIME; k>0; k--) tmprate+=radimp[k]; //dose rate
-          if(tmprate>999999) tmprate=999999; //overflow
-          rate=tmprate;
+        uint32_t tmprate=0;
+        for(uint8_t k=GEIGER_TIME; k>0; k--) tmprate+=radimp[k]; //dose rate
+        if(tmprate>999999) tmprate=999999; //overflow
+        rate=tmprate;
 
-          if(tmprate>maxrate) maxrate=tmprate;   //peak
+        if(tmprate>maxrate) maxrate=tmprate;   //peak
 
-          gses+=radimp[0];
-          if(gses>999999UL*3600/GEIGER_TIME) gses=999999UL*3600/GEIGER_TIME;  //overflow
+        gses+=radimp[0];
+        if(gses>999999UL*3600/GEIGER_TIME) gses=999999UL*3600/GEIGER_TIME;  //overflow
 
-          sesdose = (gses*GEIGER_TIME/3600);   //dose
+        sesdose = (gses*GEIGER_TIME/3600);   //dose
 
-          sestime = sescnt;
+        sestime = sescnt;
 
-          counter_to_date(get_rtc_cnt(), &srtc);   //get date and time
+        glog[0]=rate; //write log
+        if(!(sestime%60)) for(uint8_t k=127; k>0; k--) glog[k]=glog[k-1]; //shift log
 
-          sysvdd = get_vdd();          // get Vdd
-          sysbat = get_bat(sysvdd);    // get Vbat
+        counter_to_date(get_rtc_cnt(), &srtc);   //get date and time
 
-          glog[0]=rate;
+        sysvdd = get_vdd();          // get Vdd
+        sysbat = get_bat(sysvdd);    // get Vbat
 
-          if(!(sestime%60)) for(uint8_t k=127; k>0; k--) glog[k]=glog[k-1]; //shift //write log //xxx
+        if(sysbat<3400) batlow=1;
+        if(sysbat>3500) batlow=0;
+        if(sysbat<3000) batfail=1;  // battery less than 3V
 
-          gf=0;
-          df=0;
-          }
+        if(radimp[0]==0)  // if no pulses
+            {
+            if(fcnt<GEIGER_TIME/2) fcnt++;
+            else
+                {
+                ff=1;    //set flag - harware fail
+                HV_OFF;  //turn off HV converter
+                }
+            }
+        else fcnt=0;
 
-      if(df==0)  //++++++++++++++++++++++++++++++> display <+++++++++++++++++++++++++++++++++++++++
-          {
-          oled_clear();
+        gflag=0;
+        df=0;
+        }
 
-          if(sysbat<3000)  // battery less than 3V
-              {
-              oled_print(0,10,"BATTERY LOW");
-              oled_update();
-              HAL_Delay(1000);
-              sys_backup(tottime+sestime, totdose+sesdose);
-              oled_off();
-              sys_standby();
-              }
+    if(pf==1 || batfail==1)  //------------> turn off the system <-------------
+        {
+        if(batfail==1)
+            {
+            oled_clear();
+            oled_print(0,10,"BATTERY LOW");
+            oled_update();
+            HAL_Delay(1000);
+            }
+        sys_backup(tottime+sestime, totdose+sesdose, oledbright);
+        oled_off();
+        sys_standby();
+        }
 
-          static uint8_t batlow=0;
-          if(sysbat<3400) batlow=1;
-          if(sysbat>3500) batlow=0;
+    if(df==0)  //--------------------------> display <-------------------------
+        {
+        oled_clear();
 
-          if(batlow) oled_line(0,10,35,10);     //// > HEADER < ////
+        if(ff) oled_char(40,7,'!');
+        if(batlow) oled_line(0,9,35,9);
 
-          sprintf(strbuff, "%1u.%03u", sysbat/1000, sysbat%1000);  // print battery voltage
-          oled_print(0,7,strbuff);
-          oled_char(31,7,'V');
+        sprintf(strbuff, "%1u.%03u", sysbat/1000, sysbat%1000);  // print battery voltage
+        oled_print(0,7,strbuff);
+        oled_char(31,7,'V');
 
-          sprintf(strbuff, "%0u-%02u-%02u", srtc.wday, srtc.mday, srtc.month);  // print date
-          oled_print(48,7,strbuff);
+        sprintf(strbuff, "%0u-%02u-%02u", srtc.wday, srtc.mday, srtc.month);  // print date
+        oled_print(48,7,strbuff);
 
-          sprintf(strbuff, "%02u:%02u", srtc.hour, srtc.minute);  // print time
-          oled_print(99,7,strbuff);
+        sprintf(strbuff, "%02u:%02u", srtc.hour, srtc.minute);  // print time
+        oled_print(99,7,strbuff);
 
-          if(smode==0)  ////////////////////////////  > main screen <   ////////////////////////////
-              {
-              sprintf(strbuff," %6lu uR", sesdose);
-              oled_print(0,24,strbuff);
+        if(smode==0)  ////////////////////  main screen  //////////////////////
+            {
+            sprintf(strbuff," %6lu uR", sesdose);
+            oled_print(0,24,strbuff);
 
-              sprintf(strbuff," %6lu uR/h", maxrate);
-              oled_print(0,34,strbuff);
+            sprintf(strbuff," %6lu uR/h", maxrate);
+            oled_print(0,34,strbuff);
 
-              draw_graph();
+            draw_graph();
 
-              sprintf(strbuff,"%lu", rate);
-              if(rate<=9) oled_print16x30(94, 46, strbuff );
-              else if(rate<=99) oled_print16x30(87, 46, strbuff );
-              else if(rate<=999) oled_print16x30(80, 46, strbuff );
-              else oled_print(87, 34, strbuff );
+            sprintf(strbuff,"%lu", rate);
+            if(rate<=9) oled_print16x30(94, 46, strbuff );
+            else if(rate<=99) oled_print16x30(87, 46, strbuff );
+            else if(rate<=999) oled_print16x30(80, 46, strbuff );
+            else oled_print(87, 34, strbuff );
 
-              uint8_t tday = (sestime/86400)%100; //99 days max
-              uint8_t thour = (sestime/3600)%24;
-              uint8_t tminute = (sestime/60)%60;
+            uint8_t tday = (sestime/86400)%100; //99 days max
+            uint8_t thour = (sestime/3600)%24;
+            uint8_t tminute = (sestime/60)%60;
 
-              sprintf(strbuff, "%02u-%02u:%02u", tday, thour, tminute);
-              oled_print(81,63,strbuff);
-              }
+            sprintf(strbuff, "%02u-%02u:%02u", tday, thour, tminute);
+            oled_print(81,63,strbuff);
+            }
 
-          if(smode==1 && nummen==0)   /////////////////   > secondary screen <   /////////////////////
-              {
-              sprintf(strbuff, "%1u.%03u", sysvdd/1000, sysvdd%1000);  // print Vdd
-              oled_print(0,19,strbuff);
-              oled_char(31,19,'V');
+        if(smode==1 && mmenu==0)  ///////////////  secondary screen  //////////////////
+            {
+            sprintf(strbuff, "%1u.%03u", sysvdd/1000, sysvdd%1000);  // print Vdd
+            oled_print(0,19,strbuff);
+            oled_char(31,19,'V');
 
-              sprintf(strbuff, "-%04u", srtc.year);
-              oled_print(60,18,strbuff);
+            sprintf(strbuff, "-%04u", srtc.year);
+            oled_print(60,18,strbuff);
 
-              sprintf(strbuff, ":%02u", srtc.second);
-              oled_print(111,18,strbuff);
+            sprintf(strbuff, ":%02u", srtc.second);
+            oled_print(111,18,strbuff);
 
-              draw_graph2();
+            draw_graph2();
 
-              sprintf(strbuff, "%10lu uR", totdose+sesdose);  //tot dose
-              oled_print(0,63,strbuff);
+            sprintf(strbuff, "%10lu uR", totdose+sesdose);  //tot dose
+            oled_print(0,63,strbuff);
 
-              uint32_t newttot=tottime+sestime;
-              uint16_t tday = (newttot/86400)%10000; //9999 days max
-              uint8_t thour = (newttot/3600)%24;
-              uint8_t tminute = (newttot/60)%60;
+            uint32_t newttot=tottime+sestime;
+            uint16_t tday = (newttot/86400)%10000; //9999 days max
+            uint8_t thour = (newttot/3600)%24;
+            uint8_t tminute = (newttot/60)%60;
 
-              sprintf(strbuff, "%4u", tday);  //tot day of work  //tot time of work
-              oled_print(105,52,strbuff);
+            sprintf(strbuff, "%4u", tday);  //tot day of work  //tot time of work
+            oled_print(105,52,strbuff);
 
-              sprintf(strbuff, "%02u:%02u", thour, tminute);
-              oled_print(99,63,strbuff);
-              }
+            sprintf(strbuff, "%02u:%02u", thour, tminute);
+            oled_print(99,63,strbuff);
+            }
 
-          if(smode==1 && nummen>0 && dtmenu==0  && crmenu==0 && ssmenu==0)  ////  draw Main menu  ////
-              {
-              newsrtc=srtc;  //update the data before setup entering
+        if(smode==1 && mmenu>0 && dtmenu==0  && crmenu==0 && ssmenu==0)  //////  Main menu  //////
+            {
+            newsrtc=srtc;  //update the data before setup entering
 
-              oled_print(7,25,"Not Allowed");
-              oled_print(7,37,"Set Date & Time");
-              oled_print(7,49,"Clear Data");
+            oled_print(7,25,"General Settings");
+            oled_print(7,37,"Set Date & Time");
+            oled_print(7,49,"Clear Data");
 
-              if(nummen==1) oled_char(0,25,'>');
-              if(nummen==2) oled_char(0,37,'>');
-              if(nummen==3) oled_char(0,49,'>');
+            if(mmenu==1) oled_char(0,25,'>');
+            if(mmenu==2) oled_char(0,37,'>');
+            if(mmenu==3)
+                {
+                oled_char(0,49,'>');
+                oled_print(98,63,"^exit"); //help
+                }
+            else oled_print(98,63,"^down"); //help
 
-              oled_print(98,63,"^down"); //help
-              }
+            }
 
-          if(smode==1 && nummen==1 && ssmenu>0)  ////  ////
-              {
-              //
-              }
+        if(smode==1 && mmenu==1 && ssmenu>0)  //////  draw System Settings menu  ///////
+            {
+            sprintf(strbuff, "%03u", oledbright);
+            oled_print(104,25,strbuff);
+            oled_print(7,25,"Brightness");
 
-          if(smode==1 && nummen==2 && dtmenu>0)    ////  draw Set Date and Time menu  ////
-              {
-              sprintf(strbuff, "-%04u", srtc.year);
-              oled_print(59,18,strbuff);
+            oled_print(7,37,"Run HV Converter");
 
-              sprintf(strbuff, ":%02u", srtc.second);
-              oled_print(110,18,strbuff);
+            if(ssmenu==1) oled_char(0,25,'>');
+            if(ssmenu==2) oled_char(0,37,'>');
 
-              sprintf(strbuff, "%02u-%02u", newsrtc.mday, newsrtc.month);
-              oled_print(59,35,strbuff);
+            oled_print(86,63,"^change"); //help
+            }
 
-              sprintf(strbuff, "%02u:%02u", newsrtc.hour, newsrtc.minute);
-              oled_print(98,35,strbuff);
+        if(smode==1 && mmenu==2 && dtmenu>0)  //////  draw Set Date and Time menu  /////
+            {
+            sprintf(strbuff, "-%04u", srtc.year);
+            oled_print(59,18,strbuff);
 
-              sprintf(strbuff, "-%04u", newsrtc.year);
-              oled_print(59,46,strbuff);
+            sprintf(strbuff, ":%02u", srtc.second);
+            oled_print(110,18,strbuff);
 
-              sprintf(strbuff, ":%02u", newsrtc.second);
-              oled_print(110,46,strbuff);
+            sprintf(strbuff, "%02u-%02u", newsrtc.mday, newsrtc.month);
+            oled_print(59,35,strbuff);
 
-              if(dtmenu==1) { oled_char_inv(58,35,13); }  //invert selected item
-              if(dtmenu==2) { oled_char_inv(76,35,13); }
-              if(dtmenu==3) { oled_char_inv(64,46,25); }
-              if(dtmenu==4) { oled_char_inv(97,35,13); }
-              if(dtmenu==5) { oled_char_inv(115,35,13); }
-              if(dtmenu==6) { oled_char_inv(115,46,13); }
+            sprintf(strbuff, "%02u:%02u", newsrtc.hour, newsrtc.minute);
+            oled_print(98,35,strbuff);
 
-              oled_print(86,63,"^change"); //help
-              }
+            sprintf(strbuff, "-%04u", newsrtc.year);
+            oled_print(59,46,strbuff);
 
-          if(smode==1 && nummen==3 && crmenu>0)    ////  draw the Clear Data menu  ////
-              {
-              oled_print(7,25,"Current Dose Rate");
-              oled_print(7,37,"Total Dose & Time");
+            sprintf(strbuff, ":%02u", newsrtc.second);
+            oled_print(110,46,strbuff);
 
-              if(crmenu==1) oled_char(0,24,'>');
-              if(crmenu==2) oled_char(0,36,'>');
+            if(dtmenu==1) { oled_char_inv(58,35,13); }  //invert selected item
+            if(dtmenu==2) { oled_char_inv(76,35,13); }
+            if(dtmenu==3) { oled_char_inv(64,46,25); }
+            if(dtmenu==4) { oled_char_inv(97,35,13); }
+            if(dtmenu==5) { oled_char_inv(115,35,13); }
+            if(dtmenu==6) { oled_char_inv(115,46,13); }
 
-              oled_print(93,63,"^clear"); //help
-              }
+            oled_print(86,63,"^change"); //help
+            }
 
-          oled_update();
-          df=1;
-          }               // end of Display
+        if(smode==1 && mmenu==3 && crmenu>0)  ///////  draw the Clear Data menu  ///////
+            {
+            oled_print(7,25,"Current Dose Rate");
+            oled_print(7,37,"Total Dose & Time");
 
-    if(button1_h())  /////////////////////////////  button #1  ////////////////////////////////////
+            if(crmenu==1) oled_char(0,25,'>');
+            if(crmenu==2) oled_char(0,37,'>');
+
+            oled_print(93,63,"^clear"); //help
+            }
+
+        oled_update();
+        df=1;
+        }  // end of Display
+
+    HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);  //power down
+
+    if(button1_h())  //------------------------>  button #1  <---------------------------
         {
         while(button1_h());
 
         if(smode==0)  //system off
             {
-            sys_backup(tottime+sestime, totdose+sesdose);
-            oled_off();
-            sys_standby();
+            pf=1;
             }
 
         if(smode==1)  //enter the main menu
             {
-            if(dtmenu==0 && crmenu==0 && ssmenu==0)  { if(++nummen>3) nummen=0; }  // switching the main menu items
-
-            if(nummen==1)  //
+            if(dtmenu==0 && crmenu==0 && ssmenu==0)
                 {
-                //
+                if(++mmenu>3) mmenu=0;  // switching the main menu items
                 }
 
-            if(nummen==2)  //Set Date and Time
+            if(mmenu==1)  // General Settigs
+                {
+                if(ssmenu==1)  //display brightness
+                    {
+                    if((oledbright+=50)>250) oledbright=0;
+                    oled_bright(oledbright);
+                    }
+                if(ssmenu==2)
+                    {
+                    fcnt=0;
+                    ff=0;
+                    HV_ON;
+                    ssmenu=0; //clr for exit
+                    mmenu=0;
+                    smode=0;
+                    }
+                }
+
+            if(mmenu==2)  //Set Date and Time
                 {
                 if(dtmenu==1)  { if(++newsrtc.mday>31)   newsrtc.mday=1;    }
                 if(dtmenu==2)  { if(++newsrtc.month>12)  newsrtc.month=1;   }
@@ -623,7 +682,7 @@ int main(void)
                 if(dtmenu==6)  { newsrtc.second=0; }
                 }
 
-            if(nummen==3)  //Clear Data
+            if(mmenu==3)  //Clear Data
                 {
                 if(crmenu==1) //clear current dose rate
                     {
@@ -631,7 +690,7 @@ int main(void)
                     maxrate=0;
                     rate=0;
                     crmenu=0; //clr for exit
-                    nummen=0;
+                    mmenu=0;
                     smode=0;
                     }
 
@@ -644,7 +703,7 @@ int main(void)
                     sesdose=0;
                     totdose=0;
                     crmenu=0;  //clr for exit
-                    nummen=0;
+                    mmenu=0;
                     }
                 }
 
@@ -652,21 +711,24 @@ int main(void)
             }
         }
 
-    if(button2_h())  ////////////////////////////  button #2  /////////////////////////////////////
+    if(button2_h() && pf==0)  //--------------------> button #2  <-----------------------
         {
         while(button2_h());
 
-        if(smode==0 || (smode==1 && nummen==0))  // switching screens
+        if(smode==0 || (smode==1 && mmenu==0))  // switching screens
             {
             if(++smode>1) smode=0;
             }
 
-        if(smode==1 && nummen==1)
+        if(smode==1 && mmenu==1)  // switching System Settings menu items
             {
-            //
+            if(++ssmenu>2)
+                {
+                ssmenu=0;
+                }
             }
 
-        if(smode==1 && nummen==2)  // switching the Set Time and Date menu items
+        if(smode==1 && mmenu==2)  // switching the Set Time and Date menu items
             {
             if(++dtmenu>6)
                 {
@@ -676,7 +738,7 @@ int main(void)
                 }
             }
 
-        if(smode==1 && nummen==3)  // switching the Clear Menu items
+        if(smode==1 && mmenu==3)  // switching the Clear Menu items
             {
             if(++crmenu>2)
                 {
@@ -686,9 +748,7 @@ int main(void)
 
         df=0;
         }
-
-    HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);  //power down
-    }
+    }  //end of main loop
   //^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   /* USER CODE END 3 */
 
@@ -965,7 +1025,9 @@ void _Error_Handler(char *file, int line)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-  BOARD_LED_ON;
+  //
+  BOARD_LED_ON;  //xxx
+  //
   while(1)
   {
   }
